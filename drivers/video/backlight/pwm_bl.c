@@ -37,6 +37,7 @@ struct pwm_bl_data {
 	int			(*check_fb)(struct device *, struct fb_info *);
 	void			(*exit)(struct device *);
 	char			fb_id[16];
+	bool			is_forlinx;
 };
 
 static void pwm_backlight_power_on(struct pwm_bl_data *pb)
@@ -101,6 +102,12 @@ static int pwm_backlight_update_status(struct backlight_device *bl)
 		brightness = pb->notify(pb->dev, brightness);
 
 	if (brightness > 0) {
+		pwm_get_state(pb->pwm, &state);
+		if(pb->is_forlinx && state.duty_cycle == 0){
+			state.duty_cycle = compute_duty_cycle(pb, bl->props.max_brightness / 2, &state);
+			pwm_apply_state(pb->pwm, &state);
+			pwm_backlight_power_on(pb);
+		}
 		pwm_get_state(pb->pwm, &state);
 		state.duty_cycle = compute_duty_cycle(pb, brightness, &state);
 		state.enabled = true;
@@ -506,6 +513,8 @@ static int pwm_backlight_probe(struct platform_device *pdev)
 	pb->post_pwm_on_delay = data->post_pwm_on_delay;
 	pb->pwm_off_delay = data->pwm_off_delay;
 	strcpy(pb->fb_id, data->fb_id);
+
+	pb->is_forlinx = of_property_read_bool(pdev->dev.of_node, "is-forlinx");
 
 	pb->enable_gpio = devm_gpiod_get_optional(&pdev->dev, "enable",
 						  GPIOD_ASIS);

@@ -65,6 +65,8 @@
 #define PCAL6524_OUT_INDCONF	0x2c
 #define PCAL6524_DEBOUNCE	0x2d
 
+#define PCAL953X_I2C_INT_EDGE	0x60
+
 #define PCA_GPIO_MASK		GENMASK(7, 0)
 
 #define PCAL_GPIO_MASK		GENMASK(4, 0)
@@ -72,6 +74,7 @@
 
 #define PCA_INT			BIT(8)
 #define PCA_PCAL		BIT(9)
+#define PCA_I2C_EDGEINT		BIT(10)
 #define PCA_LATCH_INT		(PCA_PCAL | PCA_INT)
 #define PCA953X_TYPE		BIT(12)
 #define PCA957X_TYPE		BIT(13)
@@ -101,7 +104,7 @@ static const struct i2c_device_id pca953x_id[] = {
 
 	{ "pcal6408", 8 | PCA953X_TYPE | PCA_LATCH_INT, },
 	{ "pcal6416", 16 | PCA953X_TYPE | PCA_LATCH_INT, },
-	{ "pcal6524", 24 | PCA953X_TYPE | PCA_LATCH_INT, },
+	{ "pcal6524", 24 | PCA953X_TYPE | PCA_LATCH_INT | PCA_I2C_EDGEINT, },
 	{ "pcal6534", 34 | PCAL653X_TYPE | PCA_LATCH_INT, },
 	{ "pcal9535", 16 | PCA953X_TYPE | PCA_LATCH_INT, },
 	{ "pcal9554b", 8  | PCA953X_TYPE | PCA_LATCH_INT, },
@@ -356,6 +359,10 @@ static bool pca953x_readable_register(struct device *dev, unsigned int reg)
 	struct pca953x_chip *chip = dev_get_drvdata(dev);
 	u32 bank;
 
+	/* Interrupt edge registers for pcal6524 */
+	if ((chip->driver_data & PCA_I2C_EDGEINT) && reg >=0x60 && reg <= 0x65)
+		return true;
+
 	if (PCA_CHIP_TYPE(chip->driver_data) == PCA957X_TYPE) {
 		bank = PCA957x_BANK_INPUT | PCA957x_BANK_OUTPUT |
 		       PCA957x_BANK_POLARITY | PCA957x_BANK_CONFIG |
@@ -378,6 +385,10 @@ static bool pca953x_writeable_register(struct device *dev, unsigned int reg)
 {
 	struct pca953x_chip *chip = dev_get_drvdata(dev);
 	u32 bank;
+
+	/* Interrupt edge registers for pcal6524 */
+	if ((chip->driver_data & PCA_I2C_EDGEINT) && reg >=0x60 && reg <= 0x65)
+		return true;
 
 	if (PCA_CHIP_TYPE(chip->driver_data) == PCA957X_TYPE) {
 		bank = PCA957x_BANK_OUTPUT | PCA957x_BANK_POLARITY |
@@ -749,6 +760,36 @@ static void pca953x_irq_bus_lock(struct irq_data *d)
 	mutex_lock(&chip->irq_lock);
 }
 
+static int pca953x_irq_set_edge(struct gpio_chip *gc, unsigned off, unsigned int type)
+{
+	struct pca953x_chip *chip = gpiochip_get_data(gc);
+	int reg = PCAL953X_I2C_INT_EDGE + off / 4;
+	int bit = 0x3 << (off % 4 * 2);
+	int val = 0;
+	int ret = 0;
+
+	if (!(type & IRQ_TYPE_EDGE_BOTH)) {
+		dev_err(&chip->client->dev, "unsupported type %d\n", type);
+		return -EINVAL;
+	}
+
+	if (chip->driver_data & PCA_I2C_EDGEINT) {
+		ret = regmap_read(chip->regmap, reg, &val);
+		if(ret < 0)
+			return ret;
+
+		if (type & IRQ_TYPE_EDGE_FALLING) {
+			val |= 0x2 << (off % 4 * 2);
+		}
+		if (type & IRQ_TYPE_EDGE_RISING) {
+			val |= 0x1 << (off % 4 * 2);
+		}
+		regmap_write_bits(chip->regmap, reg, bit, val);
+	}
+
+	return 0;
+}
+
 static void pca953x_irq_bus_sync_unlock(struct irq_data *d)
 {
 	struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
@@ -780,6 +821,11 @@ static void pca953x_irq_bus_sync_unlock(struct irq_data *d)
 	for_each_set_bit(level, irq_mask, gc->ngpio)
 		pca953x_gpio_direction_input(&chip->gpio_chip, level);
 
+	/* set irq edge */
+	for_each_set_bit(level, chip->irq_trig_fall, gc->ngpio)
+		pca953x_irq_set_edge(&chip->gpio_chip, level, IRQ_TYPE_EDGE_FALLING);
+	for_each_set_bit(level, chip->irq_trig_raise, gc->ngpio)
+		pca953x_irq_set_edge(&chip->gpio_chip, level, IRQ_TYPE_EDGE_RISING);
 	mutex_unlock(&chip->irq_lock);
 }
 
@@ -840,6 +886,31 @@ static bool pca953x_irq_pending(struct pca953x_chip *chip, unsigned long *pendin
 	DECLARE_BITMAP(new_stat, MAX_LINE);
 	DECLARE_BITMAP(trigger, MAX_LINE);
 	int ret;
+
+	if (chip->driver_data & PCA_PCAL) {
+		/* Read the current interrupt status from the device */
+		ret = pca953x_read_regs(chip, PCAL953X_INT_STAT, trigger);
+		if (ret)
+			return false;
+
+		/* Check latched inputs and clear interrupt status */
+		ret = pca953x_read_regs(chip, chip->regs->input, cur_stat);
+		if (ret)
+			return false;
+
+		/* if set edgint to i2c device, trigger is suited for irq_trig_fall or irq_trig_raise */
+		if (chip->driver_data & PCA_I2C_EDGEINT) {
+			bitmap_copy(pending, trigger, gc->ngpio);
+			return !bitmap_empty(pending, gc->ngpio);
+		}
+
+		/* Apply filter for rising/falling edge selection */
+		bitmap_replace(new_stat, chip->irq_trig_fall, chip->irq_trig_raise, cur_stat, gc->ngpio);
+
+		bitmap_and(pending, new_stat, trigger, gc->ngpio);
+
+		return !bitmap_empty(pending, gc->ngpio);
+	}
 
 	ret = pca953x_read_regs(chip, chip->regs->input, cur_stat);
 	if (ret)
@@ -1303,7 +1374,7 @@ static const struct of_device_id pca953x_dt_ids[] = {
 
 	{ .compatible = "nxp,pcal6408", .data = OF_953X(8, PCA_LATCH_INT), },
 	{ .compatible = "nxp,pcal6416", .data = OF_953X(16, PCA_LATCH_INT), },
-	{ .compatible = "nxp,pcal6524", .data = OF_953X(24, PCA_LATCH_INT), },
+	{ .compatible = "nxp,pcal6524", .data = OF_953X(24, PCA_LATCH_INT | PCA_I2C_EDGEINT), },
 	{ .compatible = "nxp,pcal6534", .data = OF_653X(34, PCA_LATCH_INT), },
 	{ .compatible = "nxp,pcal9535", .data = OF_953X(16, PCA_LATCH_INT), },
 	{ .compatible = "nxp,pcal9554b", .data = OF_953X( 8, PCA_LATCH_INT), },

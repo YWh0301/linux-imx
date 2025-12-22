@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config WLAN_VENDOR_NXP
+	bool "NXP devices"
+	default y
+	help
+	  If you have a wireless card belonging to this class, say Y.
+
+	  Note that the answer to this question doesn't directly affect the
+	  kernel: saying N will just cause the configurator to skip all the
+	  questions about these cards. If you say Y, you will be asked for
+	  your specific card in the following questions.
+
+if WLAN_VENDOR_NXP
+
+config NXP88W8987
+	tristate "NXP 88W8987 WiFi Driver"
+	depends on CFG80211
+	help
+	  This driver is multi-chip-multi-interface driver
+	  (indicating Multi-Chip x Multi-Interface support) based on
+	  NXP 802.11n/ac chipsets. If you choose to build it as a module,
+	  it will be build 2 modules moal.ko and mlan.ko.
+
+
+endif # WLAN_VENDOR_NXP

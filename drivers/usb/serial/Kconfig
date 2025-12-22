@@ -643,6 +643,9 @@ config USB_SERIAL_XR
 	  To compile this driver as a module, choose M here: the
 	  module will be called xr_serial.
 
+config USB_SERIAL_EXAR
+	tristate "exar USB to uart"
+
 config USB_SERIAL_DEBUG
 	tristate "USB Debugging Device"
 	help

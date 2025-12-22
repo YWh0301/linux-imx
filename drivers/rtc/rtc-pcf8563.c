@@ -78,8 +78,10 @@ struct pcf8563 {
 	int c_polarity;	/* 0: MO_C=1 means 19xx, otherwise MO_C=1 means 20xx */
 
 	struct i2c_client *client;
+#if 0
 #ifdef CONFIG_COMMON_CLK
 	struct clk_hw		clkout_hw;
+#endif
 #endif
 };
 
@@ -348,6 +350,7 @@ static int pcf8563_irq_enable(struct device *dev, unsigned int enabled)
 	return pcf8563_set_alarm_mode(to_i2c_client(dev), !!enabled);
 }
 
+#if 0
 #ifdef CONFIG_COMMON_CLK
 /*
  * Handling of the clkout
@@ -499,6 +502,7 @@ static struct clk *pcf8563_clkout_register_clk(struct pcf8563 *pcf8563)
 	return clk;
 }
 #endif
+#endif
 
 static const struct rtc_class_ops pcf8563_rtc_ops = {
 	.ioctl		= pcf8563_rtc_ioctl,
@@ -584,12 +588,12 @@ static int pcf8563_probe(struct i2c_client *client)
 	err = devm_rtc_register_device(pcf8563->rtc);
 	if (err)
 		return err;
-
+#if 0
 #ifdef CONFIG_COMMON_CLK
 	/* register clk in common clk framework */
 	pcf8563_clkout_register_clk(pcf8563);
 #endif
-
+#endif
 	return 0;
 }
 
