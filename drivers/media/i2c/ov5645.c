@@ -106,6 +106,7 @@ struct ov5645 {
 	u8 timing_tc_reg21;
 
 	struct mutex power_lock; /* lock to protect power state */
+	int power_count;
 
 	struct gpio_desc *enable_gpio;
 	struct gpio_desc *rst_gpio;
@@ -223,9 +224,9 @@ static const struct reg_value ov5645_global_init_setting[] = {
 	{ 0x5190, 0x42 },
 	{ 0x5191, 0xf8 },
 	{ 0x5192, 0x04 },
-	{ 0x5193, 0x70 },
-	{ 0x5194, 0xf0 },
-	{ 0x5195, 0xf0 },
+	{ 0x5193, 0xfd },
+	{ 0x5194, 0xa7 },
+	{ 0x5195, 0xfc },
 	{ 0x5196, 0x03 },
 	{ 0x5197, 0x01 },
 	{ 0x5198, 0x04 },
@@ -511,6 +512,8 @@ static const s64 link_freq[] = {
 	336000000
 };
 
+#define OV5645_DEF_MBUS_CODE	MEDIA_BUS_FMT_UYVY8_1X16
+
 static const struct ov5645_mode_info ov5645_mode_info_data[] = {
 	{
 		.width = 1280,
@@ -687,6 +690,39 @@ exit:
 	return ret;
 }
 
+static int ov5645_s_power(struct v4l2_subdev *sd, int on)
+{
+	struct ov5645 *ov5645 = to_ov5645(sd);
+	int ret = 0;
+
+	mutex_lock(&ov5645->power_lock);
+
+	/* If the power count is modified from 0 to != 0 or from != 0 to 0,
+	 * update the power state.
+	 */
+	if (ov5645->power_count == !on) {
+		if (on) {
+			pr_err("power on \n");
+			ret = ov5645_set_power_on(ov5645->dev);
+			if (ret < 0)
+				goto exit;
+			usleep_range(500, 1000);
+		} else {
+			pr_err("power off \n");
+			ov5645_set_power_off(ov5645->dev);
+		}
+	}
+
+	/* Update the power count. */
+	ov5645->power_count += on ? 1 : -1;
+	WARN_ON(ov5645->power_count < 0);
+
+exit:
+	mutex_unlock(&ov5645->power_lock);
+
+	return ret;
+}
+
 static int ov5645_set_saturation(struct ov5645 *ov5645, s32 value)
 {
 	u32 reg_value = (value * 0x10) + 0x40;
@@ -820,7 +856,7 @@ static int ov5645_enum_mbus_code(struct v4l2_subdev *sd,
 	if (code->index > 0)
 		return -EINVAL;
 
-	code->code = MEDIA_BUS_FMT_UYVY8_1X16;
+	code->code = OV5645_DEF_MBUS_CODE;
 
 	return 0;
 }
@@ -829,7 +865,7 @@ static int ov5645_enum_frame_size(struct v4l2_subdev *subdev,
 				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_frame_size_enum *fse)
 {
-	if (fse->code != MEDIA_BUS_FMT_UYVY8_1X16)
+	if (fse->code != OV5645_DEF_MBUS_CODE)
 		return -EINVAL;
 
 	if (fse->index >= ARRAY_SIZE(ov5645_mode_info_data))
@@ -843,31 +879,21 @@ static int ov5645_enum_frame_size(struct v4l2_subdev *subdev,
 	return 0;
 }
 
-static struct v4l2_mbus_framefmt *
-__ov5645_get_pad_format(struct ov5645 *ov5645,
-			struct v4l2_subdev_state *sd_state,
-			unsigned int pad,
-			enum v4l2_subdev_format_whence which)
-{
-	switch (which) {
-	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_get_try_format(&ov5645->sd, sd_state, pad);
-	case V4L2_SUBDEV_FORMAT_ACTIVE:
-		return &ov5645->fmt;
-	default:
-		return NULL;
-	}
-}
-
 static int ov5645_get_format(struct v4l2_subdev *sd,
 			     struct v4l2_subdev_state *sd_state,
 			     struct v4l2_subdev_format *format)
 {
 	struct ov5645 *ov5645 = to_ov5645(sd);
+	struct v4l2_mbus_framefmt *fmt;
+	int ret = 0;
 
-	format->format = *__ov5645_get_pad_format(ov5645, sd_state,
-						  format->pad,
-						  format->which);
+	if (format->pad != 0) {
+		return -EINVAL;
+	}
+
+	fmt = &ov5645->fmt;
+	format->format = *fmt;
+
 	return 0;
 }
 
@@ -891,47 +917,37 @@ static int ov5645_set_format(struct v4l2_subdev *sd,
 			     struct v4l2_subdev_format *format)
 {
 	struct ov5645 *ov5645 = to_ov5645(sd);
-	struct v4l2_mbus_framefmt *__format;
-	struct v4l2_rect *__crop;
-	const struct ov5645_mode_info *new_mode;
-	int ret;
+	const struct ov5645_mode_info *new_mode = NULL;
+	struct v4l2_mbus_framefmt *mbus_fmt = &format->format;
+	int ret = 0;
 
-	__crop = __ov5645_get_pad_crop(ov5645, sd_state, format->pad,
-				       format->which);
-
-	new_mode = v4l2_find_nearest_size(ov5645_mode_info_data,
-			       ARRAY_SIZE(ov5645_mode_info_data),
-			       width, height,
-			       format->format.width, format->format.height);
-
-	__crop->width = new_mode->width;
-	__crop->height = new_mode->height;
-
-	if (format->which == V4L2_SUBDEV_FORMAT_ACTIVE) {
-		ret = v4l2_ctrl_s_ctrl_int64(ov5645->pixel_clock,
-					     new_mode->pixel_clock);
-		if (ret < 0)
-			return ret;
-
-		ret = v4l2_ctrl_s_ctrl(ov5645->link_freq,
-				       new_mode->link_freq);
-		if (ret < 0)
-			return ret;
-
-		ov5645->current_mode = new_mode;
+	mutex_lock(&ov5645->power_lock);
+	if (format->pad != 0) {
+		ret = (-EINVAL);
+		goto out;
 	}
 
-	__format = __ov5645_get_pad_format(ov5645, sd_state, format->pad,
-					   format->which);
-	__format->width = __crop->width;
-	__format->height = __crop->height;
-	__format->code = MEDIA_BUS_FMT_UYVY8_1X16;
-	__format->field = V4L2_FIELD_NONE;
-	__format->colorspace = V4L2_COLORSPACE_SRGB;
+	new_mode = v4l2_find_nearest_size(ov5645_mode_info_data,
+					  ARRAY_SIZE(ov5645_mode_info_data),
+					  width, height,
+					  mbus_fmt->width, mbus_fmt->height);
+	if (!new_mode) {
+		dev_err(ov5645->dev, "Invalid resolution: w/h=(%d, %d)\n", mbus_fmt->width, mbus_fmt->height);
+		ret = (-EINVAL);
+		goto out;
+	}
 
-	format->format = *__format;
+	ov5645->current_mode = new_mode;
+	ov5645->fmt.width = mbus_fmt->width;
+	ov5645->fmt.height = mbus_fmt->height;
+	ov5645->fmt.code = OV5645_DEF_MBUS_CODE;
+	ov5645->fmt.field = mbus_fmt->field;
+	ov5645->fmt.colorspace = mbus_fmt->colorspace;
 
-	return 0;
+	out:
+	mutex_unlock(&ov5645->power_lock);
+
+	return ret;
 }
 
 static int ov5645_entity_init_cfg(struct v4l2_subdev *subdev,
@@ -1018,6 +1034,17 @@ stream_off_rpm_put:
 	return ret;
 }
 
+static int ov5645_link_setup(struct media_entity *entity,
+		const struct media_pad *local,
+		const struct media_pad *remote, u32 flags)
+{
+	return 0;
+}
+
+static const struct v4l2_subdev_core_ops ov5645_core_ops = {
+	.s_power = ov5645_s_power,
+};
+
 static const struct v4l2_subdev_video_ops ov5645_video_ops = {
 	.s_stream = ov5645_s_stream,
 };
@@ -1032,8 +1059,14 @@ static const struct v4l2_subdev_pad_ops ov5645_subdev_pad_ops = {
 };
 
 static const struct v4l2_subdev_ops ov5645_subdev_ops = {
+	.core = &ov5645_core_ops,
 	.video = &ov5645_video_ops,
 	.pad = &ov5645_subdev_pad_ops,
+};
+
+
+static const struct media_entity_operations ov5645_sd_media_ops = {
+	.link_setup = ov5645_link_setup,
 };
 
 static int ov5645_probe(struct i2c_client *client)
@@ -1045,6 +1078,7 @@ static int ov5645_probe(struct i2c_client *client)
 	unsigned int i;
 	u32 xclk_freq;
 	int ret;
+	struct v4l2_mbus_framefmt *fmt;
 
 	ov5645 = devm_kzalloc(dev, sizeof(struct ov5645), GFP_KERNEL);
 	if (!ov5645)
@@ -1052,6 +1086,16 @@ static int ov5645_probe(struct i2c_client *client)
 
 	ov5645->i2c_client = client;
 	ov5645->dev = dev;
+	fmt = &ov5645->fmt;
+
+	fmt->code = OV5645_DEF_MBUS_CODE;
+	fmt->colorspace = V4L2_COLORSPACE_SRGB;
+	fmt->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(fmt->colorspace);
+	fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
+	fmt->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(fmt->colorspace);
+	fmt->width = 1920;
+	fmt->height = 1080;
+	fmt->field = V4L2_FIELD_NONE;
 
 	endpoint = of_graph_get_next_endpoint(dev->of_node, NULL);
 	if (!endpoint) {
@@ -1166,6 +1210,7 @@ static int ov5645_probe(struct i2c_client *client)
 	ov5645->pad.flags = MEDIA_PAD_FL_SOURCE;
 	ov5645->sd.dev = &client->dev;
 	ov5645->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
+	ov5645->sd.entity.ops = &ov5645_sd_media_ops;
 
 	ret = media_entity_pads_init(&ov5645->sd.entity, 1, &ov5645->pad);
 	if (ret < 0) {
@@ -1219,8 +1264,6 @@ static int ov5645_probe(struct i2c_client *client)
 	pm_runtime_set_active(dev);
 	pm_runtime_get_noresume(dev);
 	pm_runtime_enable(dev);
-
-	ov5645_entity_init_cfg(&ov5645->sd, NULL);
 
 	ret = v4l2_async_register_subdev(&ov5645->sd);
 	if (ret < 0) {
