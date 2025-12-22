@@ -442,7 +442,7 @@ imx95-19x19-evk-adv7535-ap1302-dtbs := imx95-19x19-evk.dtb \
 dtb-$(CONFIG_ARCH_MXC) += imx95-19x19-evk-adv7535-ap1302.dtb
 
 imx95-19x19-evk-rm692c9-dtbs := imx95-19x19-evk.dtb imx95-19x19-evk-rm692c9.dtbo
-dtb-$(CONFIG_ARCH_MXC) += imx95-19x19-evk-rm692c9.dtb
+dtb-$(CONFIG_ARCH_MXC) += imx95-19x19-evk-rm692c9.dtb OK-MX95xx-C.dtb
 
 imx95-19x19-evk-it6263-lvds0-dtbs := imx95-19x19-evk.dtb imx95-19x19-evk-it6263-lvds0.dtbo
 dtb-$(CONFIG_ARCH_MXC) += imx95-19x19-evk-it6263-lvds0.dtb

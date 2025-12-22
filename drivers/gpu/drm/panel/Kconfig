@@ -864,4 +864,12 @@ config DRM_PANEL_WKS_101WX001
 	  Say Y here if you want to enable support for the WKS
 	  101WX001 controller for 1280x800 LCD panel
 
+config DRM_PANEL_FORLINX_MIPI
+       tristate "Forlinx mipi LCD"
+       depends on OF
+       depends on BACKLIGHT_CLASS_DEVICE
+       select VIDEOMODE_HELPERS
+       help
+         Say Y here if you want to enable support for the Forlinx
+         1024x600 MIPI DSI panel
 endmenu

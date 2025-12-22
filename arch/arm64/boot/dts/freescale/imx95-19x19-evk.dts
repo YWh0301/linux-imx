@@ -681,7 +681,7 @@
 	pinctrl-0 = <&pinctrl_enetc0>;
 	phy-handle = <&ethphy0>;
 	phy-mode = "rgmii-id";
-	status = "okay";
+	status = "disabled";
 };
 
 &enetc_port2 {
@@ -689,16 +689,16 @@
 	phy-mode = "10gbase-r";
 	serdes-supply = <&reg_serdes_en>;
 	managed = "in-band-status";
-	status = "okay";
+	status = "disabled";
 };
 
 &netc_timer {
-	status = "okay";
+	status = "disabled";
 };
 
 &netc_emdio {
 	phy-supply = <&reg_aqr_en>;
-	status = "okay";
+	status = "disabled";
 
 	ethphy0: ethernet-phy@1 {
 		reg = <1>;
